@@ -2,30 +2,32 @@
 
 from flwr.common import Context, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
-from flwr.server.strategy import FedAvg
-from multimodal.task import Net, get_weights
+from flwr.server.strategy import Strategy
+from multimodal.task import Net, get_weights, multimodal_fedavg
+
+
+# Define Multimodal FedAvg Strategy
+class MultimodalFedAvg(Strategy):
+    def __init__(self, multimodal_weight=100):
+        super().__init__()
+        self.multimodal_weight = multimodal_weight
+
+    def aggregate_fit(self, rnd, results, failures):
+        return multimodal_fedavg(results, self.multimodal_weight)
 
 
 def server_fn(context: Context):
-    # Read from config
+    # Load model and initialize parameters
     num_rounds = context.run_config["num-server-rounds"]
-    fraction_fit = context.run_config["fraction-fit"]
-
-    # Initialize model parameters
     ndarrays = get_weights(Net())
     parameters = ndarrays_to_parameters(ndarrays)
 
-    # Define strategy
-    strategy = FedAvg(
-        fraction_fit=fraction_fit,
-        fraction_evaluate=1.0,
-        min_available_clients=2,
-        initial_parameters=parameters,
-    )
+    # Configure strategy and server settings
+    strategy = MultimodalFedAvg()
     config = ServerConfig(num_rounds=num_rounds)
 
     return ServerAppComponents(strategy=strategy, config=config)
 
 
-# Create ServerApp
+# Flower ServerApp
 app = ServerApp(server_fn=server_fn)
