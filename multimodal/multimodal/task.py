@@ -11,6 +11,7 @@ from torchvision.transforms import Compose, Normalize, ToTensor
 import numpy as np
 import pandas as pd
 
+
 class Net(nn.Module):
     """Model (simple CNN adapted from 'PyTorch: A 60 Minute Blitz')"""
 
@@ -54,6 +55,7 @@ class SplitAutoencoder(nn.Module):
         decoded = self.decoder(encoded)
         return decoded
 
+
 class CanonicallyCorrelatedAutoencoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -86,7 +88,8 @@ class CanonicallyCorrelatedAutoencoder(nn.Module):
         correlation_loss = -torch.trace(torch.matmul(h_A.T, h_B))
         return recon_loss + correlation_loss
 
-def train_multimodal(model, trainloader, epochs, device):
+
+def train(model, trainloader, epochs, device):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     model.train()
     for _ in range(epochs):
@@ -99,7 +102,8 @@ def train_multimodal(model, trainloader, epochs, device):
             optimizer.step()
     return loss.item()
 
-def test_multimodal(model, testloader, device):
+
+def test(model, testloader, device):
     model.eval()
     total_loss = 0
     with torch.no_grad():
@@ -110,73 +114,77 @@ def test_multimodal(model, testloader, device):
             total_loss += loss.item()
     return total_loss / len(testloader), None
 
+
 def multimodal_fedavg(results, multimodal_weight):
     num_clients = len(results)
     agg_parameters = None
 
     for _, (parameters, num_samples, metadata) in enumerate(results):
         weight = num_samples
+
+        # Check if the result contains multimodal data (using metadata)
         if metadata.get("multimodal", False):
             weight *= multimodal_weight
 
+        # Assuming the model has 'input_A' and 'input_B', you might need to scale them differently
+        # based on the modality (e.g., A, B, or AB)
+
+        # Aggregate modality-specific parameters
         scaled_params = [param * weight for param in parameters]
 
         if agg_parameters is None:
             agg_parameters = scaled_params
         else:
-            agg_parameters = [agg_param + scaled_param for agg_param, scaled_param in zip(agg_parameters, scaled_params)]
+            agg_parameters = [
+                agg_param + scaled_param
+                for agg_param, scaled_param in zip(agg_parameters, scaled_params)
+            ]
 
+    # Calculate the total weight based on the number of samples and the multimodal weight
     total_weight = sum(
         num_samples * (multimodal_weight if metadata.get("multimodal", False) else 1)
         for _, num_samples, metadata in results
     )
 
+    # Normalize aggregated parameters by total weight
     return [param / total_weight for param in agg_parameters]
 
-def load_opp_data(partition_id, num_partitions):
-    """Load Opportunity dataset."""
-    data_path = "path_to_opportunity_dataset"
 
-    # Load and preprocess dataset (modify path as necessary)
-    raw_data = pd.read_csv(f"{data_path}/partition_{partition_id}.csv")
-    features = raw_data.iloc[:, :-1].values.astype(np.float32)  # Features
-    labels = raw_data.iloc[:, -1].values.astype(np.int64)  # Labels
+def load_data(partition_id, num_partitions):
+    """Load Opportunity dataset from .pt files."""
+    data_path = "data"
 
-    # Split features and labels into train/test
-    train_size = int(0.8 * len(features))
-    train_features, test_features = features[:train_size], features[train_size:]
-    train_labels, test_labels = labels[:train_size], labels[train_size:]
+    # Load the tensors from the .pt files
+    train_data = torch.load(f"{data_path}/train{partition_id}.pt")
+    test_data = torch.load(f"{data_path}/test{partition_id}.pt")
 
-    train_data = [{"input_A": f, "input_B": f, "label": l} for f, l in zip(train_features, train_labels)]
-    test_data = [{"input_A": f, "input_B": f, "label": l} for f, l in zip(test_features, test_labels)]
+    # Assuming the data is in the form (features, labels)
+    train_features = train_data[:, :-1].float()  # All but the last column as features
+    train_labels = train_data[:, -1].long()  # Last column as labels
+    test_features = test_data[:, :-1].float()
+    test_labels = test_data[:, -1].long()
+
+    # Create the data in the required format
+    train_data = [
+        {"input_A": f, "input_B": f, "label": l}
+        for f, l in zip(train_features, train_labels)
+    ]
+    test_data = [
+        {"input_A": f, "input_B": f, "label": l}
+        for f, l in zip(test_features, test_labels)
+    ]
 
     trainloader = DataLoader(train_data, batch_size=32, shuffle=True)
     testloader = DataLoader(test_data, batch_size=32)
+
     return trainloader, testloader
 
-def load_data(partition_id, num_partitions, multimodal=False):
-    if multimodal:
-        return load_opp_data(partition_id, num_partitions)
-    else:
-        global fds
-        if fds is None:
-            partitioner = IidPartitioner(num_partitions=num_partitions)
-            fds = FederatedDataset(
-                dataset="uoft-cs/cifar10", partitioners={"train": partitioner}
-            )
 
-        partition = fds.load_partition(partition_id)
-        partition_train_test = partition.train_test_split(test_size=0.2, seed=42)
+def get_weights(net):
+    return [val.cpu().numpy() for _, val in net.state_dict().items()]
 
-        pytorch_transforms = Compose(
-            [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-        )
 
-        def apply_transforms(batch):
-            batch["img"] = [pytorch_transforms(img) for img in batch["img"]]
-            return batch
-
-        partition_train_test = partition_train_test.with_transform(apply_transforms)
-        trainloader = DataLoader(partition_train_test["train"], batch_size=32, shuffle=True)
-        testloader = DataLoader(partition_train_test["test"], batch_size=32)
-        return trainloader, testloader
+def set_weights(net, parameters):
+    params_dict = zip(net.state_dict().keys(), parameters)
+    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+    net.load_state_dict(state_dict, strict=True)
